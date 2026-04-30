@@ -1,74 +1,126 @@
-// Store headers in a hash map
-// Today's goal. get tcp streaming working
+// Parse message body and store in the struct
+// headers
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
 
 typedef struct  {
-    char key[100];
-    char value[100];
+    char *key;
+    char *value;
 } RquestHeader ;
-
+~~
 typedef struct  {
 	char method[8];
 	char target[2048];
 	char httpVersion[9];
-    RquestHeader rqmap[100];
+    int content_len;
+    int body;
+    RquestHeader headers[64];
 } HTTPMessage ;
 
-void parse_req_start_line(HTTPMessage *msg, char *buff, size_t len) {
+int parse_req_start_line(HTTPMessage *msg, char *buff, size_t len) {
 
     int count = 0;
     int prv = 0;
     int i = 0;
 
-    while (1) {
-        printf("%c", buff[i]);
-        i++;
-    }
+    while (count < 3) {
 
-    // while (count < 3) {
-
-    //     char *body_part;
-    //     if (count == 0) {
-    //         body_part = msg->method;
-    //     } else if (count == 1){
-    //         body_part = msg->target ;
-    //     } else if (count == 2) {
-    //         body_part = msg -> httpVersion;
-    //     } 
+        char *body_part;
+        if (count == 0) {
+            body_part = msg->method;
+        } else if (count == 1){
+            body_part = msg->target ;
+        } else if (count == 2) {
+            body_part = msg -> httpVersion;
+        } 
         
-    //     if (buff[i] == ' ') {
+        if (buff[i] == ' ') {
 
-    //         int seq = prv;
-    //         for (int ptr = prv; ptr < i; ptr++) {
-    //             body_part[ptr-seq] = buff[ptr];
-    //         }
-    //         count++;
-    //         prv = i + 1;
-    //     }
+            int seq = prv;
+            for (int ptr = prv; ptr < i; ptr++) {
+                body_part[ptr-seq] = buff[ptr];
+            }
+            count++;
+            body_part[i-seq] = '\0';
+            prv = i + 1;
+        }
 
-    //     i++;
+        i++;
 
-    //     if (buff[i] == '\r' && buff[i + 1] == '\n') {
-    //         int seq = prv;
-    //         for (int ptr = prv; ptr < i; ptr++) {
-    //             body_part[ptr-seq] = buff[ptr];
-    //         }
-    //         count++;
-    //         prv = i + 1;
-    //         i += 2;
-    //         if (buff[i] == '\r' && buff[i + 1] == '\n') {
-    //             break;
-    //         }
-    //     }
-    // }
+        if (buff[i] == '\r' && buff[i + 1] == '\n') {
+            int seq = prv;
+            for (int ptr = prv; ptr < i; ptr++) {
+                body_part[ptr-seq] = buff[ptr];
+            }
+            body_part[i-seq] = '\0';
+            count++;
+            prv = i + 1;
+            i = i + 2;
+            if (buff[i] == '\r' && buff[i + 1] == '\n') {
+                i = i + 2;
+                return i;
+            }
+        }
+
+    }
+    return i;
 
 }
 
-void RequestParse() {}
+void parse_headers(int *offset, HTTPMessage *msg, char *buff, size_t len) {
+
+    int i = *offset;
+    int header_count = 0;
+
+    while(i < len - 1) {
+
+
+        if(buff[i] == '\r' && buff[i + 1] == '\n') {
+            break;
+        }
+
+
+        int key_start = i;
+        while (i < len - 1 && buff[i] != ':') {
+            i++;
+        }
+        buff[i] = '\0';
+        int key_len = i - key_start + 1;
+
+        msg->headers[header_count].key = strndup(&buff[key_start], key_len);
+
+        i++;
+        if(i < len - 1 && buff[i] == ' ') {
+            i++;
+        }
+
+        int val_start = i;
+        while(i < len -1 && !(buff[i] == '\r' && buff[i + 1] == '\n')) {
+            i++;
+        }
+        
+        buff[i] = '\0';
+        int val_len = i - val_start + 1;
+        msg->headers[header_count].value = strndup(&buff[val_start], val_len);
+
+        if (strcmp("Content-Length", msg->headers[header_count].key) == 0 ) {
+            msg->body = 1;
+            msg->content_len = atoi(msg->headers[header_count].value);
+        }
+
+        printf("%s: %s\n", msg->headers[header_count].key, msg->headers[header_count].value);
+        header_count += 1;
+        i += 2;
+
+    }
+
+
+}
 
 int main() {
 	int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -92,10 +144,9 @@ int main() {
 	recv(client_fd, buff, sizeof buff, 0);
 
     HTTPMessage message;
-    parse_req_start_line(&message, buff, sizeof buff);
-    printf("Method: %s\n", message.method);
-    printf("Target: %s\n", message.target);
-    printf("Http Version: %s\n", message.httpVersion);
+    int offset = parse_req_start_line(&message, buff, sizeof buff);
+    parse_headers(&offset, &message, buff, sizeof buff);
+
 
 	write(client_fd, "Hello back", sizeof("Hello back"));
 	close(client_fd);

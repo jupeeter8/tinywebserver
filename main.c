@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <time.h>
 
 
 typedef struct  {
@@ -22,8 +23,15 @@ typedef struct  {
     int content_len;
     int body;
     int header_count;
+    char* msg_body;
     RquestHeader headers[64];
 } HTTPMessage ;
+
+struct sockaddr_in addr  = {
+    .sin_family = AF_INET,
+    .sin_port = htons(9000),
+    .sin_addr.s_addr = INADDR_ANY
+};
 
 int parse_req_start_line(HTTPMessage *msg, char *buff, size_t len) {
 
@@ -77,9 +85,11 @@ int parse_req_start_line(HTTPMessage *msg, char *buff, size_t len) {
 void parse_headers(int *offset, HTTPMessage *msg, char *buff, size_t len) {
 
     int i = *offset;
+    msg->content_len = 0;
+    msg->body = 0;
     msg->header_count = 0;
 
-    while(i < len - 1) {
+    while(i < len) {
 
 
         if(buff[i] == '\r' && buff[i + 1] == '\n') {
@@ -124,11 +134,12 @@ void parse_headers(int *offset, HTTPMessage *msg, char *buff, size_t len) {
 }
 
 int check_header_eol(int head, size_t bytes, char *buff) {
-    while(head <= bytes) {
+    int total = bytes+head;
+    while(head <= total) {
         if (buff[head] == '\r' && buff[head + 1] == '\n') {
             if (buff[head + 2] == '\r' && buff[head +3] == '\n') {
                 head += 4;
-                return bytes - head;
+                return total-head;
             }
         }
         head++;
@@ -137,107 +148,133 @@ int check_header_eol(int head, size_t bytes, char *buff) {
     return -1;
 }
 
+int read_failed(int bytes, int client_fd) {
+
+    if (bytes == -1) {
+        switch (errno) {
+            case EAGAIN:
+                usleep(20000);
+                return 1;
+            default:
+                perror("Failed to read from socket\n");
+                close(client_fd);
+                return 0;
+        }
+    }
+    if (bytes == 0) {
+        printf("The client has closed the connection\n");
+        return 0;
+    }
+    return 1;
+}
+
+
+void recv_msg(char* buff, int client_fd, HTTPMessage* msg, size_t len) {
+
+    int reader = 0;
+    int msg_start = -1;
+    int msg_flag = 0;
+    int total_bytes = 0;
+
+    while (reader <= len) {
+        int bytes = recv(client_fd, buff + reader, len  - reader, 0);
+
+        if (!read_failed(bytes, client_fd)) {
+            break;
+        }
+        total_bytes += bytes;
+
+        int header_chk = check_header_eol(reader, bytes, buff);
+        if (header_chk == 0) {
+            msg_flag = 1;
+            reader += bytes;
+            msg_start = reader + bytes - header_chk;
+            printf("total bytes: %d\n", total_bytes);
+            break;
+        } else if (header_chk > 0) {
+            msg_flag = 1;
+            msg_start = reader + bytes - header_chk;
+            reader += bytes;
+            printf("total bytes: %d\n", total_bytes);
+            break;
+        }
+
+        printf("total bytes: %d\n", total_bytes);
+        reader += bytes;
+    }
+
+    int offset = parse_req_start_line(msg, buff, len);
+    parse_headers(&offset, msg, buff, len);
+
+    if (msg_flag) {
+        while((reader - msg_start) < msg->content_len) {
+            int bytes = recv(client_fd, buff + reader, len - reader, 0);
+            if (!read_failed(bytes, client_fd)) {
+                break;
+            }
+            total_bytes += bytes;
+            reader += bytes;
+            printf("total bytes: %d\n", total_bytes);
+        }
+        msg->msg_body = strndup(&buff[msg_start], msg->content_len);
+
+    }
+}
+
+void print_req(HTTPMessage* msg) {
+    printf("%s %s %s -", msg->method, msg->target, msg->httpVersion);
+    for (int i=0; i < msg->header_count; i++) {
+        printf(" %s: %s", msg->headers[i].key, msg->headers[i].value);
+    }
+    if (msg->body) {
+        printf(" %s\n", msg->msg_body);
+    }
+    printf("\n");
+
+
+}
+
 int main() {
+
+    char buff[4096];
+
+
     int opt = 1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr  = {
-        .sin_family = AF_INET,
-        .sin_port = htons(9000),
-        .sin_addr.s_addr = INADDR_ANY
-    };
 
     int error = bind(fd, (struct sockaddr *)&addr, sizeof(addr));
     if (error < 0) {
         perror("bind failed");
         return 1;
     }
-    listen(fd, 5);
+    listen(fd, 2);
 
-    int client_fd = accept(fd, NULL, NULL);
-
-    char buff[4096];
-
-    int read_offset = 0;
-    int msg_start = -1;
-    int msg_flag = 0;
+    int con_count = 1;
     while (1) {
-        printf("reading remaining data");
-        int bytes = recv(client_fd, buff + read_offset, sizeof buff - read_offset, 0);
-        if (bytes == -1) {
-            switch (errno) {
-                case EAGAIN:
-                    usleep(20000);
-                    break;
-                default:
-                    perror("Failed to read from socket\n");
-                    close(client_fd);
-                    break;
-            }
-            break;
+        HTTPMessage message;
+        
+        int client_fd = accept(fd, NULL, NULL);
+        printf("accepted connection: %d on fd: %d\n", con_count, client_fd);
+        con_count++;
+        struct timespec t_start, t_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_start);
+        recv_msg(buff, client_fd, &message, sizeof buff);
+        int send_sts = send(client_fd, "HTTP/1.1 200 OK\r\n\r\n", sizeof "HTTP/1.1 200 OK\r\n\r\n", 0);
+        if (send_sts < 1) {
+            perror("Send failed: ");
         }
-        if (bytes == 0) {
-            printf("The client has closed the connection\n");
-            break;
+        clock_gettime(CLOCK_MONOTONIC, &t_end);
+        long ms = (t_end.tv_sec - t_start.tv_sec) * 1000 + (t_end.tv_nsec - t_start.tv_nsec) / 1000000;
+        printf("req %ld ms\n", ms);
+        close(client_fd);
+        free(message.msg_body);
+        for(int i = 0; i < message.header_count; i++){
+            free(message.headers[i].key);
+            free(message.headers[i].value);
         }
-
-        int header_chk = check_header_eol(read_offset, bytes, buff);
-        if (header_chk == 0) {
-            printf("Recieved all headers\n");
-            msg_flag = 1;
-            read_offset += bytes;
-            break;
-        } else if (header_chk > 0) {
-            printf("Recieved all headers and body conent\n");
-            msg_flag = 1;
-            msg_start = read_offset + bytes - header_chk;
-            read_offset += bytes;
-            break;
-        }
-
-        read_offset += bytes;
     }
-
-    HTTPMessage message;
-    int offset = parse_req_start_line(&message, buff, sizeof buff);
-    parse_headers(&offset, &message, buff, sizeof buff);
-
-    if (msg_flag) {
-        while((read_offset - msg_start) < message.content_len) {
-            int bytes = recv(client_fd, buff + read_offset, sizeof(buff) - read_offset, 0);
-            if (bytes == -1) {
-                switch (errno) {
-                    case EAGAIN:
-                        usleep(20000);
-                        break;
-                    default:
-                        perror("Failed to read from socket\n");
-                        close(client_fd);
-                        break;
-                }
-                break;
-            }
-            if (bytes == 0) {
-                printf("The client has closed the connection\n");
-                break;
-            }
-            read_offset += bytes;
-        }
-
-    }
-
-    for(int j = msg_start; j <= msg_start + message.content_len; j++){
-        printf("%c", buff[j]);
-    }
-
-
-    close(client_fd);
     close(fd);
-    return 0;
 
-    write(client_fd, "Hello back", sizeof("Hello back"));
-    close(client_fd);
-    close(fd);
 }
 

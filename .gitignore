@@ -2,3 +2,6 @@
 server
 client
 client.c
+venv
+*.py
+*.txt

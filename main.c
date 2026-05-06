@@ -33,6 +33,7 @@ struct sockaddr_in addr  = {
     .sin_addr.s_addr = INADDR_ANY
 };
 
+
 int parse_req_start_line(HTTPMessage *msg, char *buff, size_t len) {
 
     int count = 0;
@@ -133,22 +134,40 @@ void parse_headers(int *offset, HTTPMessage *msg, char *buff, size_t len) {
 
 }
 
-int check_header_eol(int head, size_t bytes, char *buff) {
+int check_header_eol(int head, size_t bytes, char *buff, int* CRLF_HEAD) {
+    printf("Bytes recv: %zu\nHead: %d\nTotal: %zu\n", bytes, head, bytes+head);
     int total = bytes+head;
-    while(head <= total) {
-        if (buff[head] == '\r' && buff[head + 1] == '\n') {
-            if (buff[head + 2] == '\r' && buff[head +3] == '\n') {
-                head += 4;
-                return total-head;
-            }
+
+    while(head < total) {
+
+        printf("%c", buff[head]);
+        if (buff[head] == '\r' && *CRLF_HEAD % 2 == 1) {
+            *CRLF_HEAD = 1;
+            head++;
+            continue;
         }
+
+        if (*CRLF_HEAD < 4) {
+            if ( *CRLF_HEAD % 2 == 0 && buff[head] == '\r') {
+                (*CRLF_HEAD) ++;
+            } else if (*CRLF_HEAD % 2 == 1 && buff[head] == '\n') {
+                (*CRLF_HEAD)++;
+            } else {
+                *CRLF_HEAD = 0;
+            }
+        } 
+
+        if (*CRLF_HEAD == 4) {
+            return total - head - 1;
+        }
+
         head++;
     }
 
     return -1;
 }
 
-int read_failed(int bytes, int client_fd) {
+int read_ok(int bytes, int client_fd) {
 
     if (bytes == -1) {
         switch (errno) {
@@ -175,41 +194,39 @@ void recv_msg(char* buff, int client_fd, HTTPMessage* msg, size_t len) {
     int msg_start = -1;
     int msg_flag = 0;
     int total_bytes = 0;
+    int CRLF_HEAD = 0;
 
-    while (reader <= len) {
+    while (reader < len) {
         int bytes = recv(client_fd, buff + reader, len  - reader, 0);
 
-        if (!read_failed(bytes, client_fd)) {
+        if (!read_ok(bytes, client_fd)) {
             break;
         }
         total_bytes += bytes;
 
-        int header_chk = check_header_eol(reader, bytes, buff);
+        int header_chk = check_header_eol(reader, bytes, buff, &CRLF_HEAD);
+        printf("Bytes after header check: %d\n", header_chk);
         if (header_chk == 0) {
-            msg_flag = 1;
             reader += bytes;
             msg_start = reader + bytes - header_chk;
-            printf("total bytes: %d\n", total_bytes);
             break;
         } else if (header_chk > 0) {
-            msg_flag = 1;
             msg_start = reader + bytes - header_chk;
             reader += bytes;
-            printf("total bytes: %d\n", total_bytes);
             break;
         }
 
-        printf("total bytes: %d\n", total_bytes);
         reader += bytes;
     }
 
     int offset = parse_req_start_line(msg, buff, len);
     parse_headers(&offset, msg, buff, len);
 
-    if (msg_flag) {
+    if (msg->body) {
+        printf("Reading body\n");
         while((reader - msg_start) < msg->content_len) {
             int bytes = recv(client_fd, buff + reader, len - reader, 0);
-            if (!read_failed(bytes, client_fd)) {
+            if (!read_ok(bytes, client_fd)) {
                 break;
             }
             total_bytes += bytes;
@@ -236,6 +253,7 @@ void print_req(HTTPMessage* msg) {
 
 int main() {
 
+    setvbuf(stdout, NULL, _IONBF, 0);
     char buff[4096];
 
 
@@ -255,24 +273,19 @@ int main() {
         HTTPMessage message;
         
         int client_fd = accept(fd, NULL, NULL);
-        printf("accepted connection: %d on fd: %d\n", con_count, client_fd);
         con_count++;
-        struct timespec t_start, t_end;
-        clock_gettime(CLOCK_MONOTONIC, &t_start);
         recv_msg(buff, client_fd, &message, sizeof buff);
         int send_sts = send(client_fd, "HTTP/1.1 200 OK\r\n\r\n", sizeof "HTTP/1.1 200 OK\r\n\r\n", 0);
         if (send_sts < 1) {
             perror("Send failed: ");
         }
-        clock_gettime(CLOCK_MONOTONIC, &t_end);
-        long ms = (t_end.tv_sec - t_start.tv_sec) * 1000 + (t_end.tv_nsec - t_start.tv_nsec) / 1000000;
-        printf("req %ld ms\n", ms);
         close(client_fd);
-        free(message.msg_body);
-        for(int i = 0; i < message.header_count; i++){
-            free(message.headers[i].key);
-            free(message.headers[i].value);
-        }
+        printf("Request completed\n");
+        // free(message.msg_body);
+        // for(int i = 0; i < message.header_count; i++){
+        //     free(message.headers[i].key);
+        //     free(message.headers[i].value);
+        // }
     }
     close(fd);
 

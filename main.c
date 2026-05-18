@@ -1,6 +1,5 @@
-// Parse message body and store in the struct
-// headers
-
+// Increase buff Size if recieved message is larger than what can be stored
+// implement multi threading
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -9,6 +8,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <time.h>
+#include <pthread.h>
 
 
 typedef struct  {
@@ -26,6 +26,13 @@ typedef struct  {
     char* msg_body;
     RquestHeader headers[64];
 } HTTPMessage ;
+
+typedef struct {
+    HTTPMessage *msg;
+    int *client_fd;
+    char *buff;
+    int len;
+} ThreadPaylod;
 
 struct sockaddr_in addr  = {
     .sin_family = AF_INET,
@@ -188,23 +195,21 @@ int read_ok(int bytes, int client_fd) {
 }
 
 
-void recv_msg(char* buff, int client_fd, HTTPMessage* msg, size_t len) {
+void *recv_msg(void *args) {
 
+    ThreadPaylod p = *(ThreadPaylod *)args;
     int reader = 0;
     int msg_start = -1;
-    int msg_flag = 0;
-    int total_bytes = 0;
     int CRLF_HEAD = 0;
 
-    while (reader < len) {
-        int bytes = recv(client_fd, buff + reader, len  - reader, 0);
+    while (reader < p.len) {
+        int bytes = recv(*(p.client_fd), p.buff + reader, p.len  - reader, 0);
 
-        if (!read_ok(bytes, client_fd)) {
+        if (!read_ok(bytes, *(p.client_fd))) {
             break;
         }
-        total_bytes += bytes;
 
-        int header_chk = check_header_eol(reader, bytes, buff, &CRLF_HEAD);
+        int header_chk = check_header_eol(reader, bytes, p.buff, &CRLF_HEAD);
         printf("Bytes after header check: %d\n", header_chk);
         if (header_chk == 0) {
             reader += bytes;
@@ -219,23 +224,43 @@ void recv_msg(char* buff, int client_fd, HTTPMessage* msg, size_t len) {
         reader += bytes;
     }
 
-    int offset = parse_req_start_line(msg, buff, len);
-    parse_headers(&offset, msg, buff, len);
+    int offset = parse_req_start_line(p.msg, p.buff, p.len);
+    parse_headers(&offset, p.msg, p.buff, p.len);
 
-    if (msg->body) {
+    if (p.msg->body) {
         printf("Reading body\n");
-        while((reader - msg_start) < msg->content_len) {
-            int bytes = recv(client_fd, buff + reader, len - reader, 0);
-            if (!read_ok(bytes, client_fd)) {
+        while((reader - msg_start) < p.msg->content_len) {
+            int bytes = recv(*(p.client_fd), p.buff + reader, p.len - reader, 0);
+            if (!read_ok(bytes, *(p.client_fd))) {
                 break;
             }
-            total_bytes += bytes;
             reader += bytes;
-            printf("total bytes: %d\n", total_bytes);
         }
-        msg->msg_body = strndup(&buff[msg_start], msg->content_len);
+        p.msg->msg_body = strndup(&(p.buff[msg_start]), p.msg->content_len);
 
     }
+
+
+    int send_sts = send(*(p.client_fd), "HTTP/1.1 200 OK\r\n\r\n", sizeof "HTTP/1.1 200 OK\r\n\r\n", 0);
+    close(*(p.client_fd));
+    free(p.client_fd);
+    if (send_sts < 1) {
+        perror("Send failed: ");
+    }
+    printf("Request completed\n");
+
+    free(p.buff);
+    free(p.msg->msg_body);
+
+    for(int count = 0; count < p.msg->header_count; count++) {
+        free(p.msg->headers[count].key);
+        free(p.msg->headers[count].value);
+    }
+
+    free(p.msg);
+    free(args);
+
+    return NULL;
 }
 
 void print_req(HTTPMessage* msg) {
@@ -254,8 +279,6 @@ void print_req(HTTPMessage* msg) {
 int main() {
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    char buff[4096];
-
 
     int opt = 1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -266,26 +289,25 @@ int main() {
         perror("bind failed");
         return 1;
     }
-    listen(fd, 2);
+    listen(fd, 100);
 
-    int con_count = 1;
     while (1) {
-        HTTPMessage message;
-        
-        int client_fd = accept(fd, NULL, NULL);
-        con_count++;
-        recv_msg(buff, client_fd, &message, sizeof buff);
-        int send_sts = send(client_fd, "HTTP/1.1 200 OK\r\n\r\n", sizeof "HTTP/1.1 200 OK\r\n\r\n", 0);
-        if (send_sts < 1) {
-            perror("Send failed: ");
-        }
-        close(client_fd);
-        printf("Request completed\n");
-        // free(message.msg_body);
-        // for(int i = 0; i < message.header_count; i++){
-        //     free(message.headers[i].key);
-        //     free(message.headers[i].value);
-        // }
+
+        pthread_t t;
+        int *client_fd = malloc(sizeof *client_fd);
+        *client_fd = accept(fd, NULL, NULL);
+        ThreadPaylod *params = malloc(sizeof *params);
+
+        *params = (ThreadPaylod){
+            .msg = malloc(sizeof(HTTPMessage)),
+            .client_fd = client_fd,
+            .buff = (char *)malloc(4096 * sizeof(char)),
+            .len = 4096,
+        };
+
+        pthread_create(&t, NULL, recv_msg, params);
+        pthread_detach(t);
+
     }
     close(fd);
 

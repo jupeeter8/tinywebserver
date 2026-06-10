@@ -43,50 +43,6 @@ struct sockaddr_in addr  = {
 
 int parse_req_start_line(HTTPMessage *msg, char *buff, size_t len) {
 
-    int count = 0;
-    int prv = 0;
-    int i = 0;
-
-    while (count < 3) {
-        char *body_part;
-        if (count == 0) {
-            body_part = msg->method;
-        } else if (count == 1){
-            body_part = msg->target ;
-        } else if (count == 2) {
-            body_part = msg -> httpVersion;
-        } 
-        
-        if (buff[i] == ' ') {
-
-            int seq = prv;
-            for (int ptr = prv; ptr < i; ptr++) {
-                body_part[ptr-seq] = buff[ptr];
-            }
-            count++;
-            body_part[i-seq] = '\0';
-            prv = i + 1;
-        }
-
-        i++;
-
-        if (buff[i] == '\r' && buff[i + 1] == '\n') {
-            int seq = prv;
-            for (int ptr = prv; ptr < i; ptr++) {
-                body_part[ptr-seq] = buff[ptr];
-            }
-            body_part[i-seq] = '\0';
-            count++;
-            prv = i + 1;
-            i = i + 2;
-            if (buff[i] == '\r' && buff[i + 1] == '\n') {
-                i = i + 2;
-                return i;
-            }
-        }
-
-    }
-    return i;
 
 }
 
